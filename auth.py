@@ -32,14 +32,16 @@ import functools
 import hmac
 import re
 import secrets
+import time
 from urllib.parse import urlsplit
 
 from flask import (Blueprint, abort, flash, g, redirect, render_template,
                    request, session, url_for)
-from werkzeug.security import check_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 
 import config
 import db
+import email_sender
 
 bp = Blueprint("auth", __name__)
 
@@ -155,6 +157,14 @@ def validate_registration(username, email, password, confirm):
     return None
 
 
+def _send_registration_code(user):
+    code = "%06d" % secrets.randbelow(1000000)
+    now = int(time.time())
+    db.save_email_verification(user["id"], generate_password_hash(code),
+                               now + config.EMAIL_CODE_TTL_SECONDS, now)
+    email_sender.send_verification_code(user["email"], code)
+
+
 # ---------------------------------------------------------------------------
 # routes
 # ---------------------------------------------------------------------------
@@ -195,6 +205,16 @@ def login():
                  detail="account disabled", ip_address=ip)
         return render_template(
             "login.html", error="That account has been disabled."), 403
+
+    if config.EMAIL_VERIFICATION_REQUIRED and not user["email_verified"]:
+        session.clear()
+        session["pending_verification_user_id"] = user["id"]
+        try:
+            _send_registration_code(user)
+        except RuntimeError:
+            return render_template("login.html", error=
+                "Verification email could not be sent. Please try again later."), 503
+        return redirect(url_for("auth.verify_email"))
 
     db.clear_login_failures(username, ip)
     session.clear()
@@ -240,10 +260,23 @@ def register():
                                username=username, email=email,
                                next_path=(request.args.get("next") or
                                           request.form.get("next") or "")), 400
-    uid = db.create_user(username, email, password, role="user")
+    needs_verification = config.EMAIL_VERIFICATION_REQUIRED
+    uid = db.create_user(username, email, password, role="user",
+                         email_verified=not needs_verification)
     db.audit("register", user_id=uid, username=username,
              ip_address=client_ip())
     session.clear()
+    if needs_verification:
+        session["pending_verification_user_id"] = uid
+        user = db.get_user_by_id(uid)
+        try:
+            _send_registration_code(user)
+        except RuntimeError:
+            return render_template("register.html", error=
+                "Account created, but verification email could not be sent. "
+                "Confirm the mail configuration and sign in to retry.",
+                username=username, email=email), 503
+        return redirect(url_for("auth.verify_email"))
     session["user_id"] = uid
     session["auth_epoch"] = db.session_epoch()
     session.permanent = True
@@ -251,6 +284,35 @@ def register():
     if nxt:
         return redirect(nxt)
     return redirect(url_for("main.dashboard"))
+
+
+@bp.route("/verify-email", methods=("GET", "POST"))
+def verify_email():
+    uid = session.get("pending_verification_user_id")
+    user = db.get_user_by_id(uid) if uid is not None else None
+    if user is None:
+        return redirect(url_for("auth.login"))
+    masked = user["email"][0] + "***@" + user["email"].split("@", 1)[1]
+    if request.method == "GET":
+        return render_template("verify_email.html", masked_email=masked)
+    code = (request.form.get("code") or "").strip()
+    row = db.get_email_verification(uid)
+    if row is None or int(row["expires_at"]) < int(time.time()):
+        return render_template("verify_email.html", masked_email=masked,
+                               error="That code has expired. Sign in to request a new one."), 400
+    if int(row["attempt_count"]) >= config.EMAIL_CODE_MAX_ATTEMPTS:
+        return render_template("verify_email.html", masked_email=masked,
+                               error="Too many incorrect attempts. Sign in to request a new code."), 429
+    if not check_password_hash(row["code_hash"], code):
+        db.increment_email_verification_attempts(uid)
+        return render_template("verify_email.html", masked_email=masked,
+                               error="Incorrect verification code."), 400
+    db.mark_email_verified(uid)
+    db.audit("email_verified", user_id=uid, username=user["username"],
+             ip_address=client_ip())
+    session.clear()
+    flash("Email verified. You may now sign in.")
+    return redirect(url_for("auth.login"))
 
 
 @bp.route("/change-password", methods=("GET", "POST"))

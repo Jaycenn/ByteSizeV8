@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Verify email{% endblock %}
+{% block auth_content %}
+<div class="auth-shell">
+  <section class="auth-intro">
+    <p class="eyebrow">Account verification</p>
+    <h1>Check your email.</h1>
+    <p>We sent a six-digit code to {{ masked_email }}. The code expires shortly.</p>
+  </section>
+  <form method="post" class="auth-card">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div><p class="eyebrow">Verify</p><h2>Enter verification code</h2></div>
+    {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+    <label for="code">Six-digit code
+      <input id="code" name="code" inputmode="numeric" pattern="[0-9]{6}"
+             minlength="6" maxlength="6" required autocomplete="one-time-code" autofocus>
+    </label>
+    <button class="button button-primary button-full">Verify email</button>
+    <p class="auth-switch"><a href="{{ url_for('auth.login') }}">Return to sign in</a></p>
+  </form>
+</div>
+{% endblock %}

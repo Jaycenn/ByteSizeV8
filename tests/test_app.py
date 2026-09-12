@@ -3349,10 +3349,43 @@ def test_image_scope_cannot_be_bypassed_by_renaming(app, appmod):
     )
 
 
+def test_registration_email_verification(app):
+    import auth
+    import config
+    sent = []
+    original_required = config.EMAIL_VERIFICATION_REQUIRED
+    original_sender = auth.email_sender.send_verification_code
+    config.EMAIL_VERIFICATION_REQUIRED = True
+    auth.email_sender.send_verification_code = lambda address, code: sent.append((address, code))
+    try:
+        c = app.test_client()
+        r = c.post("/register", data={"username": "verify-user",
+            "email": "verify@example.com", "password": "verification-pass",
+            "confirm": "verification-pass"}, follow_redirects=False)
+        check("registration requiring email redirects to verification",
+              r.status_code in (301, 302) and "/verify-email" in r.headers.get("Location", ""))
+        with c.session_transaction() as sess:
+            check("unverified registration does not create an authenticated session",
+                  "user_id" not in sess and "pending_verification_user_id" in sess)
+        check("registration sends one code to the registered address",
+              len(sent) == 1 and sent[0][0] == "verify@example.com")
+        bad = c.post("/verify-email", data={"code": "000000"})
+        check("incorrect registration verification code is rejected", bad.status_code == 400)
+        good = c.post("/verify-email", data={"code": sent[0][1]}, follow_redirects=False)
+        check("correct registration verification code is accepted",
+              good.status_code in (301, 302) and "/login" in good.headers.get("Location", ""))
+        check("verified account can sign in",
+              login(c, "verify-user", "verification-pass").status_code in (301, 302))
+    finally:
+        config.EMAIL_VERIFICATION_REQUIRED = original_required
+        auth.email_sender.send_verification_code = original_sender
+
+
 def main():
     app, appmod, dbpath = make_app()
     try:
         test_auth(app, appmod)
+        test_registration_email_verification(app)
         test_logout_back_navigation_is_not_authenticated(app)
         test_rate_limit(app)
         test_forced_password_change(app)

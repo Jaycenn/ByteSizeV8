@@ -149,6 +149,14 @@ def _migrate(conn):
     # Explicit additive migration for databases created before durable result
     # storage existed.  CREATE IF NOT EXISTS keeps repeated startups harmless.
     conn.executescript("""
+        ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 1;
+    """) if "email_verified" not in {r["name"] for r in conn.execute("PRAGMA table_info(users)")} else None
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS email_verification_codes (
+            user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            code_hash TEXT NOT NULL, expires_at INTEGER NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0, sent_at INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS stored_artifacts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             history_id INTEGER NOT NULL UNIQUE
@@ -275,17 +283,47 @@ def get_user_by_email(email):
 
 
 def create_user(username, email, password, role="user",
-                must_change_password=0):
+                must_change_password=0, email_verified=True):
     from werkzeug.security import generate_password_hash
     conn = get_db()
     cur = conn.execute(
         "INSERT INTO users (username, email, password_hash, role,"
-        " must_change_password) VALUES (?, ?, ?, ?, ?) RETURNING id",
+        " must_change_password, email_verified) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
         (username, email, generate_password_hash(password), role,
-         bool(must_change_password)))
+         bool(must_change_password), bool(email_verified)))
     new_id = cur.fetchone()["id"]
     conn.commit()
     return new_id
+
+
+def save_email_verification(user_id, code_hash, expires_at, sent_at):
+    conn = get_db()
+    conn.execute("INSERT INTO email_verification_codes"
+                 " (user_id, code_hash, expires_at, attempt_count, sent_at)"
+                 " VALUES (?, ?, ?, 0, ?) ON CONFLICT(user_id) DO UPDATE SET"
+                 " code_hash=excluded.code_hash, expires_at=excluded.expires_at,"
+                 " attempt_count=0, sent_at=excluded.sent_at",
+                 (user_id, code_hash, int(expires_at), int(sent_at)))
+    conn.commit()
+
+
+def get_email_verification(user_id):
+    return get_db().execute("SELECT * FROM email_verification_codes WHERE user_id = ?",
+                            (user_id,)).fetchone()
+
+
+def increment_email_verification_attempts(user_id):
+    conn = get_db()
+    conn.execute("UPDATE email_verification_codes SET attempt_count=attempt_count+1"
+                 " WHERE user_id=?", (user_id,))
+    conn.commit()
+
+
+def mark_email_verified(user_id):
+    conn = get_db()
+    conn.execute("UPDATE users SET email_verified=TRUE WHERE id=?", (user_id,))
+    conn.execute("DELETE FROM email_verification_codes WHERE user_id=?", (user_id,))
+    conn.commit()
 
 
 def set_password(user_id, password):

@@ -42,8 +42,18 @@ CREATE TABLE IF NOT EXISTS users (
                                      CHECK (role IN ('admin', 'user')),
     must_change_password BOOLEAN     NOT NULL DEFAULT FALSE,
     is_active            BOOLEAN     NOT NULL DEFAULT TRUE,
+    email_verified       BOOLEAN     NOT NULL DEFAULT TRUE,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_login_at        TIMESTAMPTZ
+);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT TRUE;
+
+CREATE TABLE IF NOT EXISTS email_verification_codes (
+    user_id       BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    code_hash     TEXT NOT NULL,
+    expires_at    BIGINT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    sent_at       BIGINT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_username ON users (username);
@@ -207,6 +217,7 @@ ALTER TABLE compression_history ENABLE ROW LEVEL SECURITY;
 ALTER TABLE stored_artifacts    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_log           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE login_attempts      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE email_verification_codes ENABLE ROW LEVEL SECURITY;
 
 -- ---------------------------------------------------------------------------
 -- SQLite compatibility shim

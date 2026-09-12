@@ -38,8 +38,17 @@ CREATE TABLE IF NOT EXISTS users (
                                  CHECK (role IN ('admin', 'user')),
     must_change_password INTEGER NOT NULL DEFAULT 0,
     is_active            INTEGER NOT NULL DEFAULT 1,
+    email_verified       INTEGER NOT NULL DEFAULT 1,
     created_at           TEXT    NOT NULL DEFAULT (datetime('now')),
     last_login_at        TEXT
+);
+
+CREATE TABLE IF NOT EXISTS email_verification_codes (
+    user_id       INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    code_hash     TEXT NOT NULL,
+    expires_at    INTEGER NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    sent_at       INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_username ON users (username);

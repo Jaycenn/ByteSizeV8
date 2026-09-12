@@ -170,6 +170,19 @@ DEFAULT_ADMIN_PASSWORD = os.environ.get("AFC_ADMIN_PASSWORD", "afc-admin")
 LOGIN_MAX_ATTEMPTS = int(os.environ.get("AFC_LOGIN_MAX_ATTEMPTS", 5))
 LOGIN_WINDOW_SECONDS = int(os.environ.get("AFC_LOGIN_WINDOW_SECONDS", 300))
 
+# Optional registration email verification. Enable only after SMTP secrets are
+# configured. Existing accounts are treated as verified by the schema migration.
+EMAIL_VERIFICATION_REQUIRED = os.environ.get(
+    "AFC_EMAIL_VERIFICATION", "0").strip().lower() in {"1", "true", "yes", "on"}
+EMAIL_CODE_TTL_SECONDS = int(os.environ.get("AFC_EMAIL_CODE_TTL_SECONDS", 300))
+EMAIL_CODE_MAX_ATTEMPTS = int(os.environ.get("AFC_EMAIL_CODE_MAX_ATTEMPTS", 5))
+EMAIL_RESEND_SECONDS = int(os.environ.get("AFC_EMAIL_RESEND_SECONDS", 60))
+SMTP_HOST = os.environ.get("AFC_SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("AFC_SMTP_PORT", 465))
+SMTP_USERNAME = os.environ.get("AFC_SMTP_USERNAME", "")
+SMTP_APP_PASSWORD = os.environ.get("AFC_SMTP_APP_PASSWORD", "")
+SMTP_FROM = os.environ.get("AFC_SMTP_FROM", SMTP_USERNAME)
+
 # Idle session expiry.
 SESSION_LIFETIME_MINUTES = int(os.environ.get("AFC_SESSION_MINUTES", 60))
 
