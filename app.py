@@ -1426,7 +1426,11 @@ def api_status():
         uptime_seconds=round(up, 1),
         uptime_human=_uptime_human(up),
         python_version=sys.version.split()[0],
-        database=os.path.basename(config.DATABASE_PATH),
+        database=(
+        "PostgreSQL (Supabase)"
+        if config.using_postgres()
+        else os.path.basename(config.DATABASE_PATH)
+        ),      
         archive_format=config.ARCHIVE_EXT,
         max_file_size=config.MAX_FILE_SIZE,
         max_batch_size=config.MAX_BATCH_SIZE,
