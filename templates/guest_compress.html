@@ -1,0 +1,7 @@
+{#
+  The guest workspace deliberately inherits the normal Compress template.
+  There is one picker, one result renderer, and one browser workflow to keep
+  correct; guest_mode only changes endpoints and hides authenticated panes.
+#}
+{% extends "compress.html" %}
+{% block title %}Try Compression{% endblock %}

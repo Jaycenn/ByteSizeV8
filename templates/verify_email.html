@@ -5,17 +5,23 @@
   <section class="auth-intro">
     <p class="eyebrow">Account verification</p>
     <h1>Check your email.</h1>
-    <p>We sent a six-digit code to {{ masked_email }}. The code expires shortly.</p>
+    <p>Verify {{ masked_email }} with a six-digit code. Your account stays pending until verification succeeds.</p>
+    <p>Codes expire after {{ (cfg.EMAIL_CODE_TTL_SECONDS + 59) // 60 }} minutes. Requesting another code replaces the previous one.</p>
   </section>
   <form method="post" class="auth-card">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div><p class="eyebrow">Verify</p><h2>Enter verification code</h2></div>
     {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+    {% for message in get_flashed_messages() %}<p role="status">{{ message }}</p>{% endfor %}
     <label for="code">Six-digit code
       <input id="code" name="code" inputmode="numeric" pattern="[0-9]{6}"
              minlength="6" maxlength="6" required autocomplete="one-time-code" autofocus>
     </label>
     <button class="button button-primary button-full">Verify email</button>
+    <button type="submit" class="button button-full" formnovalidate
+            formaction="{{ url_for('auth.resend_verification') }}">Resend verification code</button>
+    {% if retry_after %}<p role="status">Please wait {{ retry_after }} seconds before requesting another code, then try again.</p>{% endif %}
+    <p>Delivery failed or no email arrived? Check your spam folder, then resend. You can also sign in later with the same username and password to continue; no new account is needed.</p>
     <p class="auth-switch"><a href="{{ url_for('auth.login') }}">Return to sign in</a></p>
   </form>
 </div>

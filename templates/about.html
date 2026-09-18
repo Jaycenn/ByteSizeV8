@@ -61,12 +61,17 @@
      move: PDF 12.50% over 200 files, PPT 9.21%, SWF 2.99%, GIF 2.88%, JPEG 1.50%, gzip 0.93%. Of the
      980 files, 60 (6.1%) did not shrink at all and were stored verbatim rather than expanded. The corpus
      is thread 000 exactly as distributed, less one 131,010,734-byte member that exceeds the 100 MB
-     per-file ceiling ByteSize enforces, so the evaluation set cannot contain a file the system would
-     itself refuse.
-     ByteSize therefore makes <strong>no general compression-percentage claim</strong> for PDF or DOCX: a PDF of
+     per-file ceiling ByteSize enforces. These broader corpus measurements were conducted at the
+     compression-engine level to characterize behavior across file classes and helped define the deployed
+     system scope; they do not mean that every measured format is accepted by the current web interface.
+     New web compression accepts only PDF, TXT, CSV, TSV, JSON, SQL, XML, HTML, HTM, LOG, PY, JS, C,
+     CPP, H, and HPP. Standalone images, Microsoft Word OOXML files, and other unsupported extensions are
+     rejected. Existing AFC containers that restore DOCX remain decodable for backward compatibility.
+     These results therefore make <strong>no general compression-percentage claim</strong> for PDF or DOCX: a PDF of
      uncompressed text streams behaves like the text it contains, and a PDF of JPEGs behaves like the JPEGs.
-     Every file above — including the ones that did not shrink — was reconstructed byte for byte and SHA-256
-     verified.</p>
+     Every file in the broader benchmark &mdash; including the ones that did not shrink &mdash; was reconstructed
+     byte for byte and SHA-256 verified. The measurements are retained as evidence supporting the deployed
+     scope decisions, not as a claim that every benchmarked format is currently accepted for new compression.</p>
 </section>
 {% endset %}
 

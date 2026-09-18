@@ -12,6 +12,7 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div><p class="eyebrow">Account access</p><h2>Sign in</h2></div>
     {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+    {% for message in get_flashed_messages() %}<p role="status">{{ message }}</p>{% endfor %}
     <label for="username">Username
       <input id="username" name="username" required autofocus autocomplete="username">
     </label>
@@ -22,6 +23,7 @@
            value="{{ request.args.get('next', request.form.get('next', '')) }}">
     <button class="button button-primary button-full">Sign in</button>
     <p class="auth-switch">New to ByteSize? <a href="{{ url_for('auth.register', next=request.args.get('next', request.form.get('next', ''))) }}">Create an account</a></p>
+    <p>Awaiting email verification? Sign in with your existing username and password to enter or resend your code.</p>
   </form>
 </div>
 {% endblock %}

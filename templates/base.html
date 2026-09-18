@@ -23,11 +23,10 @@
 <body class="bg-paper text-ink min-h-screen">
 <a class="skip-link" href="#mainContent">Skip to main content</a>
 
-{#  Two shells, one distinction: the public website for signed-out visitors and
-    the ByteSize Workspace for signed-in users. Compression itself is gated on
-    the server (every /api action is login_required), so the public side never
-    needs a half-working copy of the workspace. #}
-{% if current_user %}
+{#  The full workspace belongs to signed-in users.  /try deliberately borrows
+    its shell and the normal single-file interface, while every other
+    workspace destination remains protected by its server-side auth gate. #}
+{% if current_user or guest_mode|default(false) %}
 <div class="app-mobilebar no-print">
   <button id="navToggle" class="nav-toggle" aria-label="Open navigation" aria-expanded="false">
     <span aria-hidden="true">&#9776;</span>
@@ -57,14 +56,16 @@
            ('main.files_page','Files'),
            ('main.about_page','About')] %}
       <a href="{{ url_for(ep) }}"
-         {% if request.endpoint == ep %}class="active" aria-current="page"{% endif %}>{{ label }}</a>
+         {% if request.endpoint == ep or
+               (guest_mode|default(false) and ep == 'main.compress_page') %}
+         class="active" aria-current="page"{% endif %}>{{ label }}</a>
       {% endfor %}
 
       <div class="nav-divider"></div>
       <a href="{{ url_for('main.settings_page') }}"
          {% if request.endpoint == 'main.settings_page' %}class="active" aria-current="page"{% endif %}>Settings</a>
 
-      {% if current_user['role'] == 'admin' %}
+      {% if current_user and current_user['role'] == 'admin' %}
       <p class="nav-label">Administration</p>
       <a href="{{ url_for('admin.users') }}"
          {% if request.endpoint == 'admin.users' %}class="active" aria-current="page"{% endif %}>Users</a>
@@ -74,6 +75,7 @@
     </nav>
 
     <div class="sidebar-account">
+      {% if current_user %}
       <div class="account-row">
         <span class="account-avatar" aria-hidden="true">{{ current_user['username'][0]|upper }}</span>
         <span class="account-copy">
@@ -88,6 +90,19 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button class="quiet-button">Sign out</button>
       </form>
+      {% else %}
+      <div class="account-row">
+        <span class="account-avatar" aria-hidden="true">G</span>
+        <span class="account-copy">
+          <strong>Guest</strong>
+          <small>Temporary workspace</small>
+        </span>
+      </div>
+      <a class="quiet-button"
+         href="{{ url_for('auth.login', next=url_for('main.compress_page')) }}">Sign in</a>
+      <a class="quiet-button"
+         href="{{ url_for('auth.register', next=url_for('main.compress_page')) }}">Create account</a>
+      {% endif %}
     </div>
   </aside>
 
@@ -102,7 +117,10 @@
 <nav class="app-bottomnav no-print" aria-label="Primary navigation">
   {% for ep, short in [('main.dashboard','Home'),('main.compress_page','Compress'),
                        ('main.decompress_page','Decompress'),('main.files_page','Files')] %}
-  <a href="{{ url_for(ep) }}" {% if request.endpoint == ep %}class="active" aria-current="page"{% endif %}>{{ short }}</a>
+  <a href="{{ url_for(ep) }}"
+     {% if request.endpoint == ep or
+           (guest_mode|default(false) and ep == 'main.compress_page') %}
+     class="active" aria-current="page"{% endif %}>{{ short }}</a>
   {% endfor %}
 </nav>
 
@@ -161,6 +179,9 @@
       {% if request.endpoint == 'main.landing' %}
       <a class="public-nav-link public-nav-jump" href="#method">How it works</a>
       <a class="public-nav-link public-nav-jump" href="#formats">Formats</a>
+      {% endif %}
+      {% if request.endpoint in ('main.about_page', 'auth.login', 'auth.register') %}
+      <a class="public-nav-link" href="{{ url_for('main.landing') }}">Home</a>
       {% endif %}
       <a class="public-nav-link public-nav-secondary" href="{{ url_for('main.about_page') }}">About</a>
       <a class="public-nav-link" href="{{ url_for('auth.login', next=next_target) if next_target else url_for('auth.login') }}">Sign in</a>

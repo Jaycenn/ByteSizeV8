@@ -12,13 +12,36 @@
 #}
 {% block content %}
 <div class="rule2 pt-4">
+  {% if guest_mode|default(false) %}
+  <p class="eyebrow">Guest workspace</p>
+  <h1 class="font-display text-2xl">Compress a File</h1>
+  <p class="text-dim dark:text-[#9c968a] text-sm mt-1">
+    Use the normal lossless single-file workflow. Results are temporary and
+    are not added to history or permanent storage.
+  </p>
+  {% else %}
   <p class="eyebrow">New compression</p>
   <h1 class="font-display text-2xl">Compress Files</h1>
-  <p class="text-dim dark:text-[#9c968a] text-sm mt-1">Choose a file, select a profile, and create a lossless AFC container.</p>
+  <p class="text-dim dark:text-[#9c968a] text-sm mt-1">Choose a file, select a preset, and create a lossless AFC container.</p>
+  {% endif %}
 </div>
 
 <!-- tabs -->
 <div class="flex flex-wrap gap-2 mt-5 border-b border-line dark:border-[#35322c] no-print" role="tablist">
+  {% if guest_mode|default(false) %}
+  <button class="tab px-4 py-2 text-sm border-b-2 -mb-px border-maroon
+                 text-maroon font-semibold"
+          id="tab-single" data-tab="single" role="tab"
+          aria-controls="pane-single" aria-selected="true" tabindex="0">
+    Single file
+  </button>
+  {% for label in ['Queue &amp; batch', 'Folder &rarr; archive'] %}
+  <a class="px-4 py-2 text-sm border-b-2 -mb-px border-transparent
+            text-dim dark:text-[#9c968a] hover:text-ink"
+     href="{{ url_for('auth.login', next=url_for('main.compress_page')) }}"
+     data-auth-required="true">{{ label|safe }}</a>
+  {% endfor %}
+  {% else %}
   {% for id, label in [('single','Single file'), ('queue','Queue &amp; batch'),
                        ('archive','Folder → archive')] %}
   <button class="tab px-4 py-2 text-sm border-b-2 -mb-px
@@ -29,6 +52,7 @@
           aria-selected="{{ 'true' if loop.first else 'false' }}"
           tabindex="{{ '0' if loop.first else '-1' }}">{{ label|safe }}</button>
   {% endfor %}
+  {% endif %}
 </div>
 
 <!-- ================= SINGLE FILE ================= -->
@@ -38,6 +62,9 @@
     <div class="lg:col-span-2">
       <div id="sDrop" tabindex="0" role="button"
            aria-label="Drop a file here or click to choose one"
+           data-compress-endpoint="{{ url_for('main.api_guest_compress') if guest_mode|default(false) else url_for('main.api_compress') }}"
+           data-guest-mode="{{ 'true' if guest_mode|default(false) else 'false' }}"
+           data-guest-exhausted="{{ 'true' if guest_exhausted|default(false) else 'false' }}"
            class="border-2 border-dashed border-line dark:border-[#35322c] rounded-lg
                   px-4 py-12 sm:py-16 text-center cursor-pointer hover:border-maroon
                   focus:outline-none focus:ring-2 focus:ring-maroon/40 transition-colors">
@@ -50,9 +77,10 @@
         <span class="inline-block mt-2 px-4 py-2 rounded-md border border-line
                      dark:border-[#35322c] text-sm hover:border-maroon">Select File</span>
         <p class="font-data text-[11px] text-dim dark:text-[#9c968a] mt-4 max-w-md mx-auto">
-          In-scope inputs include TXT, CSV, JSON, SQL, XML, HTML, LOG, source
-          code, and PDF. Accepted files are restored exactly. Microsoft Word
-           DOCX-family files are outside the declared study scope and are not
+          In-scope inputs include PDF, TXT, CSV, TSV, JSON, SQL, XML, HTML,
+          HTM, LOG, and source code (PY, JS, C, CPP, H, and HPP). Accepted
+          files are restored exactly. Microsoft Word DOCX-family files are
+          outside the declared study scope and are not
           accepted for new compression.
         </p>
         <p class="font-data text-[11px] text-dim dark:text-[#9c968a] mt-1" id="sLimit">…</p>
@@ -95,6 +123,24 @@
       </div>
 
       <p id="sErr" class="hidden error-panel text-sm mt-3 rounded-md px-3 py-2" role="alert"></p>
+
+      {% if guest_mode|default(false) %}
+      <div id="guestGate" class="{% if not guest_exhausted|default(false) %}hidden {% endif %}mt-4 border border-line
+                               dark:border-[#35322c] rounded-lg p-5">
+        <p class="eyebrow">Continue in the full workspace</p>
+        <h2 class="font-display text-lg">Sign in or create an account.</h2>
+        <p class="text-sm text-dim dark:text-[#9c968a] mt-2">
+          Account access includes additional compression, Queue and Batch,
+          AFCPAK archives, history, and stored results.
+        </p>
+        <div class="flex flex-wrap gap-3 mt-4">
+          <a class="button button-primary"
+             href="{{ url_for('auth.login', next=url_for('main.compress_page')) }}">Sign in</a>
+          <a class="button button-secondary"
+             href="{{ url_for('auth.register', next=url_for('main.compress_page')) }}">Create account</a>
+        </div>
+      </div>
+      {% endif %}
 
       <!-- ---------------- RESULT ---------------- -->
       <div id="sResult" class="hidden mt-5 bg-white dark:bg-[#1c1b18] border border-line
@@ -206,6 +252,7 @@
   </div>
 </section>
 
+{% if not guest_mode|default(false) %}
 <!-- ================= QUEUE ================= -->
 <section id="pane-queue" class="pane hidden mt-5" role="tabpanel"
          aria-labelledby="tab-queue">
@@ -373,15 +420,18 @@
     </div>
   </div>
 </section>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
 {# The scope suffix gives browsers a new URL for the stricter picker/drop
    validation instead of restoring an older cached JavaScript response. #}
+{% if not guest_mode|default(false) %}
 <script src="{{ url_for('static', filename='js/queue.js',
                         v='scope-filter') }}"></script>
+{% endif %}
 <script src="{{ url_for('static', filename='js/compress.js',
-                        v='scope-filter') }}"></script>
+                        v='guest-workspace') }}"></script>
 <script>
 // Baseline is the single-tier Huffman control kept for the method comparison,
 // not a setting anyone would pick to get a smaller file. The presets tune the

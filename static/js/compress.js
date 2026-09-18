@@ -7,8 +7,9 @@
  * the operation is never silently switched, which is the whole point of
  * splitting the two pages.
  *
- * It posts to the existing /api/compress endpoint and renders what comes back.
- * No compression logic lives in the browser; the engine is unchanged.
+ * It posts to the endpoint declared by the shared template: /api/compress for
+ * an account or the temporary guest endpoint on /try. No compression logic
+ * lives in the browser; the engine is unchanged.
  */
 "use strict";
 
@@ -16,7 +17,11 @@
   var $ = function (id) { return document.getElementById(id); };
   if (!$("sDrop")) return;                    // not on the compress page
 
+  var drop = $("sDrop");
   var CFG = null, picked = null, busy = false;
+  var guestMode = drop.dataset.guestMode === "true";
+  var guestExhausted = drop.dataset.guestExhausted === "true";
+  var compressEndpoint = drop.dataset.compressEndpoint || "/api/compress";
 
   function human(n) {
     n = Number(n) || 0;
@@ -30,6 +35,21 @@
     var el = $("sErr");
     el.innerHTML = msg || "";
     show(el, !!msg);
+  }
+
+  function maxFileSize() {
+    if (!CFG) return 0;
+    return guestMode ? CFG.guest_max_file_size : CFG.max_file_size;
+  }
+
+  function lockGuestWorkspace() {
+    if (!guestMode) return;
+    guestExhausted = true;
+    picked = null;
+    $("sRun").disabled = true;
+    drop.setAttribute("aria-disabled", "true");
+    var gate = $("guestGate");
+    if (gate) show(gate, true);
   }
 
   var FALLBACK_ALLOWED_EXTENSIONS = [
@@ -63,8 +83,10 @@
 
   fetch("/api/config").then(function (r) { return r.json(); }).then(function (c) {
     CFG = c;
-    $("sLimit").textContent = "Up to " + human(c.max_file_size) + " per file";
+    $("sLimit").textContent = "Up to " + human(maxFileSize()) + " per file";
   }).catch(function () { $("sLimit").textContent = ""; });
+
+  if (guestExhausted) lockGuestWorkspace();
 
   // ---- tabs (this page's own panes; queue.js owns the queue/archive ones) --
   document.querySelectorAll(".tab").forEach(function (btn) {
@@ -117,7 +139,7 @@
   }
 
   function pick(file) {
-    if (!file) return;
+    if (!file || guestExhausted) return;
 
     setErr("");
     show($("sResult"), false);
@@ -155,9 +177,9 @@
                + human(CFG.min_file_size) + " minimum.");
         return;
       }
-      if (file.size > CFG.max_file_size) {
+      if (file.size > maxFileSize()) {
         setErr("That file is " + human(file.size) + ", above the "
-               + human(CFG.max_file_size) + " maximum for a single file.");
+               + human(maxFileSize()) + " maximum for a single file.");
         return;
       }
     }
@@ -179,7 +201,12 @@
       $("sPickType").textContent = "detecting…";
       show($("sPicked"), true);
       $("sRun").disabled = false;
-      inspect(file);
+      if (guestMode) {
+        $("sPickType").textContent = "ready";
+        show($("sPre"), false);
+      } else {
+        inspect(file);
+      }
     });
   }
 
@@ -238,9 +265,10 @@
   }
 
   // ---- restricted file picker and drop zone ------------------------------
-  var drop = $("sDrop"), input = $("sInput");
+  var input = $("sInput");
 
   async function openScopedFilePicker() {
+    if (guestExhausted) return;
     /*
      * Chrome and Edge support this stricter picker. Removing the
      * "All files" option prevents DOCX-family files from appearing in
@@ -364,7 +392,7 @@
 
     // XHR (not fetch) so the upload phase can drive a real progress bar.
     var xhr = new XMLHttpRequest();
-    xhr.open("POST", "/api/compress");
+    xhr.open("POST", compressEndpoint);
     xhr.upload.onprogress = function (e) {
       if (!e.lengthComputable) return;
       var pct = Math.round(70 * e.loaded / e.total);
@@ -373,7 +401,7 @@
     };
     xhr.onload = function () {
       busy = false;
-      $("sRun").disabled = false;
+      $("sRun").disabled = guestExhausted;
       $("sProg").style.width = "100%";
       $("sStatus").textContent = "";
       var j;
@@ -382,9 +410,11 @@
       if (xhr.status !== 200) {
         show($("sProgWrap"), false);
         setErr(esc(j.error || "Compression failed."));
+        if (j.trial_exhausted) lockGuestWorkspace();
         return;
       }
       render(j);
+      if (j.trial_exhausted) lockGuestWorkspace();
     };
     xhr.onerror = function () {
       busy = false;
@@ -444,7 +474,7 @@
     $("rSha").textContent = j.sha256_original
       ? "SHA-256 of original: " + j.sha256_original : "";
     $("rExplain").textContent = j.explain || "";
-    $("rDownload").href = "/download/" + j.token;
+    $("rDownload").href = j.download_url || ("/download/" + j.token);
     $("rDownload").setAttribute("download", j.output_name || (j.name + ".afc"));
 
     // A negative saving means the container was larger than the input — say so

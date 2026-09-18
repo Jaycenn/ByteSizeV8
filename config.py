@@ -48,6 +48,18 @@ MAX_FILE_SIZE = int(os.environ.get("AFC_MAX_FILE_SIZE", 100 * MB))
 # Maximum accepted TOTAL size for one batch/queue/archive run.
 MAX_BATCH_SIZE = int(os.environ.get("AFC_MAX_BATCH_SIZE", 500 * MB))
 
+# Anonymous trial policy. Guest uploads use the same scope validator and
+# compression engine as signed-in uploads, but are deliberately smaller,
+# single-file only, temporary, and limited per signed browser session.  The
+# operation cap is intentionally not part of public_dict(): product copy and
+# browser code must not advertise the numerical allowance.
+GUEST_COMPRESSION_LIMIT = 3
+GUEST_MAX_FILE_SIZE = max(
+    MIN_FILE_SIZE,
+    min(MAX_FILE_SIZE, int(os.environ.get("AFC_GUEST_MAX_FILE_SIZE", 5 * MB))))
+GUEST_RESULT_TTL_SECONDS = max(
+    60, int(os.environ.get("AFC_GUEST_RESULT_TTL_SECONDS", 60 * 60)))
+
 # Hard HTTP body cap.  Must be >= MAX_FILE_SIZE or large uploads would be
 # rejected by Werkzeug before our own friendlier check ever runs.  Headroom
 # covers multipart overhead and the batch endpoint.
@@ -174,9 +186,9 @@ LOGIN_WINDOW_SECONDS = int(os.environ.get("AFC_LOGIN_WINDOW_SECONDS", 300))
 # configured. Existing accounts are treated as verified by the schema migration.
 EMAIL_VERIFICATION_REQUIRED = os.environ.get(
     "AFC_EMAIL_VERIFICATION", "0").strip().lower() in {"1", "true", "yes", "on"}
-EMAIL_CODE_TTL_SECONDS = int(os.environ.get("AFC_EMAIL_CODE_TTL_SECONDS", 300))
-EMAIL_CODE_MAX_ATTEMPTS = int(os.environ.get("AFC_EMAIL_CODE_MAX_ATTEMPTS", 5))
-EMAIL_RESEND_SECONDS = int(os.environ.get("AFC_EMAIL_RESEND_SECONDS", 60))
+EMAIL_CODE_TTL_SECONDS = max(1, int(os.environ.get("AFC_EMAIL_CODE_TTL_SECONDS", 300)))
+EMAIL_CODE_MAX_ATTEMPTS = max(1, int(os.environ.get("AFC_EMAIL_CODE_MAX_ATTEMPTS", 5)))
+EMAIL_RESEND_SECONDS = max(60, int(os.environ.get("AFC_EMAIL_RESEND_SECONDS", 60)))
 SMTP_HOST = os.environ.get("AFC_SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("AFC_SMTP_PORT", 465))
 SMTP_USERNAME = os.environ.get("AFC_SMTP_USERNAME", "")
@@ -278,6 +290,7 @@ def public_dict():
         "min_file_size": MIN_FILE_SIZE,
         "max_file_size": MAX_FILE_SIZE,
         "max_batch_size": MAX_BATCH_SIZE,
+        "guest_max_file_size": GUEST_MAX_FILE_SIZE,
         "paper_tested_max_file": PAPER_TESTED_MAX_FILE,
         "paper_tested_max_batch": PAPER_TESTED_MAX_BATCH,
         "archive_ext": ARCHIVE_EXT,

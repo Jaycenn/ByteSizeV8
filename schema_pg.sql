@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS email_verification_codes (
     code_hash     TEXT NOT NULL,
     expires_at    BIGINT NOT NULL,
     attempt_count INTEGER NOT NULL DEFAULT 0,
-    sent_at       BIGINT NOT NULL
+    sent_at       BIGINT NOT NULL -- Last delivery attempt, including SMTP failure.
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_username ON users (username);

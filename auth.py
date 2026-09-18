@@ -37,7 +37,7 @@ from urllib.parse import urlsplit
 
 from flask import (Blueprint, abort, flash, g, redirect, render_template,
                    request, session, url_for)
-from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.security import check_password_hash
 
 import config
 import db
@@ -63,7 +63,7 @@ def current_user():
     user = db.get_user_by_id(uid)
     # Account changes take effect for already-issued cookies.  A disabled or
     # deleted account must not retain access until the session expires.
-    if user is None or not user["is_active"]:
+    if user is None or not user["is_active"] or not user["email_verified"]:
         session.clear()
         return None
     return user
@@ -150,19 +150,71 @@ def validate_registration(username, email, password, confirm):
                 % config.MIN_PASSWORD_LENGTH)
     if password != confirm:
         return "The two passwords do not match."
-    if db.get_user_by_username(username):
-        return "That username is already taken."
-    if db.get_user_by_email(email):
-        return "That email is already registered."
+    user = db.get_user_by_username(username)
+    if user and not user["email_verified"]:
+        # A status-specific recovery message requires the same password proof
+        # and rate limit as login; registration must not become a password oracle.
+        ip = client_ip()
+        if not db.is_rate_limited(username, ip):
+            if check_password_hash(user["password_hash"], password):
+                return "This account is awaiting email verification. Sign in to continue."
+            db.record_login_failure(username, ip)
+    if user or db.get_user_by_email(email):
+        # Do not identify an email conflict or reveal verification state to
+        # someone who has not proved knowledge of the account password.
+        return REGISTRATION_UNAVAILABLE
     return None
 
 
+REGISTRATION_UNAVAILABLE = (
+    "Unable to create an account with these details. "
+    "If your account is awaiting email verification, sign in to continue.")
+
+
+def _start_verification(user_id):
+    session.clear()
+    session["pending_verification_user_id"] = user_id
+    session["pending_verification_epoch"] = db.session_epoch()
+    session["pending_verification_started_at"] = int(time.time())
+
+
+def _pending_user():
+    uid = session.get("pending_verification_user_id")
+    if uid is None:
+        return None
+    user = db.get_user_by_id(uid)
+    if (session.get("pending_verification_epoch") != db.session_epoch()
+            or int(time.time()) - session.get("pending_verification_started_at", 0)
+            >= config.SESSION_LIFETIME_MINUTES * 60
+            or user is None or not user["is_active"] or user["email_verified"]):
+        session.clear()
+        return None
+    return user
+
+
+def _verification_page(user, error=None, status=200):
+    masked = user["email"][0] + "***@" + user["email"].split("@", 1)[1]
+    row = db.get_email_verification(user["id"])
+    retry_after = max(0, int(row["sent_at"]) + config.EMAIL_RESEND_SECONDS
+                      - int(time.time())) if row else 0
+    return render_template("verify_email.html", masked_email=masked,
+                           error=error, retry_after=retry_after), status
+
+
 def _send_registration_code(user):
-    code = "%06d" % secrets.randbelow(1000000)
-    now = int(time.time())
-    db.save_email_verification(user["id"], generate_password_hash(code),
-                               now + config.EMAIL_CODE_TTL_SECONDS, now)
-    email_sender.send_verification_code(user["email"], code)
+    reserved = db.reserve_email_verification(user["id"], int(time.time()))
+    if reserved["retry_after"]:
+        return ("Please wait %d seconds before requesting another code."
+                % reserved["retry_after"], 429)
+    if not reserved.get("code"):
+        return "Sign in again to continue verification.", 400
+    try:
+        email_sender.send_verification_code(user["email"], reserved["code"])
+    except email_sender.EmailDeliveryError:
+        db.invalidate_email_verification(user["id"], reserved["code_hash"])
+        return ("Verification email could not be sent. Your account is still "
+                "pending. Please wait briefly, then use Resend verification code.", 503)
+    return "A verification code was sent. Check your inbox and spam folder.", 200
 
 
 # ---------------------------------------------------------------------------
@@ -206,14 +258,11 @@ def login():
         return render_template(
             "login.html", error="That account has been disabled."), 403
 
-    if config.EMAIL_VERIFICATION_REQUIRED and not user["email_verified"]:
-        session.clear()
-        session["pending_verification_user_id"] = user["id"]
-        try:
-            _send_registration_code(user)
-        except RuntimeError:
-            return render_template("login.html", error=
-                "Verification email could not be sent. Please try again later."), 503
+    if not user["email_verified"]:
+        db.clear_login_failures(username, ip)
+        _start_verification(user["id"])
+        message, _status = _send_registration_code(user)
+        flash(message)
         return redirect(url_for("auth.verify_email"))
 
     db.clear_login_failures(username, ip)
@@ -263,19 +312,17 @@ def register():
     needs_verification = config.EMAIL_VERIFICATION_REQUIRED
     uid = db.create_user(username, email, password, role="user",
                          email_verified=not needs_verification)
+    if uid is None:  # A concurrent registration won a uniqueness constraint.
+        return render_template("register.html", error=REGISTRATION_UNAVAILABLE,
+                               username=username, email=email), 400
     db.audit("register", user_id=uid, username=username,
              ip_address=client_ip())
     session.clear()
     if needs_verification:
-        session["pending_verification_user_id"] = uid
+        _start_verification(uid)
         user = db.get_user_by_id(uid)
-        try:
-            _send_registration_code(user)
-        except RuntimeError:
-            return render_template("register.html", error=
-                "Account created, but verification email could not be sent. "
-                "Confirm the mail configuration and sign in to retry.",
-                username=username, email=email), 503
+        message, _status = _send_registration_code(user)
+        flash(message)
         return redirect(url_for("auth.verify_email"))
     session["user_id"] = uid
     session["auth_epoch"] = db.session_epoch()
@@ -288,31 +335,40 @@ def register():
 
 @bp.route("/verify-email", methods=("GET", "POST"))
 def verify_email():
-    uid = session.get("pending_verification_user_id")
-    user = db.get_user_by_id(uid) if uid is not None else None
+    user = _pending_user()
     if user is None:
         return redirect(url_for("auth.login"))
-    masked = user["email"][0] + "***@" + user["email"].split("@", 1)[1]
     if request.method == "GET":
-        return render_template("verify_email.html", masked_email=masked)
+        return _verification_page(user)
     code = (request.form.get("code") or "").strip()
-    row = db.get_email_verification(uid)
-    if row is None or int(row["expires_at"]) < int(time.time()):
-        return render_template("verify_email.html", masked_email=masked,
-                               error="That code has expired. Sign in to request a new one."), 400
-    if int(row["attempt_count"]) >= config.EMAIL_CODE_MAX_ATTEMPTS:
-        return render_template("verify_email.html", masked_email=masked,
-                               error="Too many incorrect attempts. Sign in to request a new code."), 429
-    if not check_password_hash(row["code_hash"], code):
-        db.increment_email_verification_attempts(uid)
-        return render_template("verify_email.html", masked_email=masked,
-                               error="Incorrect verification code."), 400
-    db.mark_email_verified(uid)
+    uid = user["id"]
+    result = db.consume_email_verification(uid, code, int(time.time()))
+    errors = {
+        "expired": ("That code has expired. Use Resend verification code.", 400),
+        "limited": ("Too many incorrect attempts. Use Resend verification code after the cooldown.", 429),
+        "incorrect": ("Incorrect verification code.", 400),
+        "unavailable": ("Sign in again to continue verification.", 400),
+    }
+    if result != "verified":
+        message, status = errors[result]
+        return _verification_page(user, message, status)
     db.audit("email_verified", user_id=uid, username=user["username"],
              ip_address=client_ip())
     session.clear()
     flash("Email verified. You may now sign in.")
     return redirect(url_for("auth.login"))
+
+
+@bp.post("/verify-email/resend")
+def resend_verification():
+    user = _pending_user()
+    if user is None:
+        return redirect(url_for("auth.login"))
+    message, status = _send_registration_code(user)
+    if status != 200:
+        return _verification_page(user, message, status)
+    flash(message)
+    return redirect(url_for("auth.verify_email"))
 
 
 @bp.route("/change-password", methods=("GET", "POST"))

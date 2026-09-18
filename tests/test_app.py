@@ -59,6 +59,10 @@ def make_app():
     config.DB_BACKEND = "sqlite"
     config.STORAGE_BACKEND = "local"
     config.DATABASE_PATH = path
+    # The general suite creates accounts synchronously and must not inherit a
+    # developer's production SMTP/verification switch from .env.  The
+    # dedicated email-verification test enables this setting explicitly.
+    config.EMAIL_VERIFICATION_REQUIRED = False
     # Isolate durable files before importing app: app.py creates its default
     # application at import time, so setting only the DB here could otherwise
     # pair a disposable database with the real result directory.
@@ -668,6 +672,167 @@ def test_public_site_and_action_gates(app):
     check("gated destinations survive the sign-in round trip",
           c.get("/files", follow_redirects=False).headers.get("Location")
           == "/login?next=/files")
+
+
+def test_restricted_guest_compression_workspace(app, appmod):
+    """Guests share the single-file UI but never the account data paths."""
+    import artifact_store
+    import db
+
+    c = app.test_client()
+    page = c.get("/try")
+    check("guest compression workspace renders",
+          page.status_code == 200
+          and b'id="sDrop"' in page.data
+          and b'id="sInput"' in page.data
+          and b'id="sRun"' in page.data
+          and b'id="sResult"' in page.data,
+          page.status_code)
+    check("guest workspace reuses the normal compression script",
+          b"/static/js/compress.js?v=guest-workspace" in page.data
+          and b"guest_compress.js" not in page.data)
+    check("guest workspace does not mount queue or archive implementations",
+          b'id="pane-queue"' not in page.data
+          and b'id="pane-archive"' not in page.data
+          and b"/static/js/queue.js" not in page.data
+          and page.data.count(b'data-auth-required="true"') == 2)
+    check("guest workspace points other tabs at authentication",
+          page.data.count(b"/login?next=/compress") >= 2)
+    check("guest allowance is not exposed in public configuration",
+          "guest_compression_limit" not in c.get("/api/config").get_json()
+          and b"three files" not in page.data.lower()
+          and b"3 files" not in page.data.lower())
+
+    for path in ("/dashboard", "/compress", "/decompress", "/files",
+                 "/settings", "/compare"):
+        response = c.get(path, follow_redirects=False)
+        check("guest session remains login-gated: %s" % path,
+              response.status_code in (301, 302)
+              and "/login" in response.headers.get("Location", ""),
+              response.status_code)
+    for path in ("/api/batch", "/api/archive/create"):
+        check("guest cannot use multi-file API: %s" % path,
+              c.post(path).status_code == 401)
+
+    with app.app_context():
+        conn = db.get_db()
+        before_rows = conn.execute(
+            "SELECT COUNT(*) FROM compression_history").fetchone()[0]
+        before_artifact_rows = conn.execute(
+            "SELECT COUNT(*) FROM stored_artifacts").fetchone()[0]
+        before_audit_rows = conn.execute(
+            "SELECT COUNT(*) FROM audit_log").fetchone()[0]
+        before_files = set(artifact_store.list_keys())
+
+    rejected = c.post("/api/guest/compress", data={
+        "file": (io.BytesIO(b"not a supported document"), "notes.docx")})
+    rejected_json = rejected.get_json()
+    check("guest extension restrictions match account compression",
+          rejected.status_code == 400
+          and rejected_json.get("out_of_scope") is True,
+          rejected_json)
+
+    jpeg = b"\xff\xd8\xff" + (b"renamed image bytes" * 32)
+    renamed = c.post("/api/guest/compress", data={
+        "file": (io.BytesIO(jpeg), "renamed-image.txt")})
+    renamed_json = renamed.get_json()
+    check("guest content restrictions reject a renamed image",
+          renamed.status_code == 400
+          and renamed_json.get("out_of_scope") is True,
+          renamed_json)
+
+    original_decompress = appmod.engine.decompress_bytes
+    appmod.engine.decompress_bytes = lambda _blob: b"verification mismatch"
+    try:
+        failed = c.post("/api/guest/compress", data={
+            "file": (io.BytesIO(b"verification test" * 64), "failed.txt")})
+    finally:
+        appmod.engine.decompress_bytes = original_decompress
+    check("failed guest round-trip verification is not successful",
+          failed.status_code == 500
+          and b"round-trip verification failed" in failed.data,
+          failed.get_json())
+    with c.session_transaction() as guest_session:
+        check("rejected and unverified guest operations do not consume uses",
+              guest_session.get("guest_compressions", 0) == 0,
+              guest_session.get("guest_compressions"))
+
+    successful = []
+    source_blobs = []
+    for index in range(config.GUEST_COMPRESSION_LIMIT):
+        source = (("guest lossless file %d\n" % index).encode() * 96)
+        source_blobs.append(source)
+        response = c.post("/api/guest/compress", data={
+            "file": (io.BytesIO(source), "guest-%d.txt" % index),
+            "mode": "adaptive",
+            "preset": "balanced",
+        })
+        payload = response.get_json()
+        if response.status_code == 200:
+            successful.append(payload)
+        else:
+            print("   guest compression failed:", response.status_code,
+                  payload)
+    check("guest can complete the bounded lossless allowance",
+          len(successful) == config.GUEST_COMPRESSION_LIMIT
+          and all(item.get("lossless") for item in successful))
+    check("guest success responses keep the numerical allowance hidden",
+          all("remaining" not in item and "limit" not in item
+              for item in successful))
+
+    if successful:
+        final = successful[-1]
+        download = c.get(final["download_url"])
+        check("guest result is a temporary downloadable AFC container",
+              download.status_code == 200
+              and download.data.startswith(b"AFC5")
+              and "no-store" in download.headers.get("Cache-Control", ""))
+        check("guest result restores byte-for-byte",
+              appmod.engine.decompress_bytes(download.data)
+              == source_blobs[-1])
+        check("guest token is isolated from account result cache",
+              final["token"] in appmod.GUEST_RESULTS
+              and final["token"] not in appmod.RESULTS)
+
+        other_guest = app.test_client()
+        other_guest.get("/try")
+        check("temporary guest download is session-owned",
+              other_guest.get(final["download_url"]).status_code == 404)
+
+    over_limit = c.post("/api/guest/compress", data={
+        "file": (io.BytesIO(b"one request too many" * 64), "blocked.txt")})
+    over_limit_json = over_limit.get_json()
+    check("guest cannot exceed the compression allowance",
+          over_limit.status_code == 403
+          and over_limit_json.get("trial_exhausted") is True
+          and "remaining" not in over_limit_json
+          and "limit" not in over_limit_json,
+          over_limit_json)
+    exhausted_page = c.get("/try").data
+    check("exhausted guest sees an unnumbered account gate",
+          b'data-guest-exhausted="true"' in exhausted_page
+          and b'id="guestGate" class="mt-4' in exhausted_page
+          and b"guest compression limit" not in exhausted_page.lower())
+
+    with app.app_context():
+        conn = db.get_db()
+        after_rows = conn.execute(
+            "SELECT COUNT(*) FROM compression_history").fetchone()[0]
+        after_artifact_rows = conn.execute(
+            "SELECT COUNT(*) FROM stored_artifacts").fetchone()[0]
+        after_audit_rows = conn.execute(
+            "SELECT COUNT(*) FROM audit_log").fetchone()[0]
+        after_files = set(artifact_store.list_keys())
+    check("guest operations create no history or stored-artifact records",
+          after_rows == before_rows
+          and after_artifact_rows == before_artifact_rows,
+          (before_rows, after_rows, before_artifact_rows,
+           after_artifact_rows))
+    check("guest operations create no analytics or durable result files",
+          after_audit_rows == before_audit_rows
+          and after_files == before_files,
+          (before_audit_rows, after_audit_rows,
+           before_files, after_files))
 
 
 def test_intended_destination_preserved(app):
@@ -2053,7 +2218,7 @@ def test_pages_are_separate(app):
     check("Decompress page is headed 'Decompress Files'",
           b"Decompress Files" in rd.data)
     check("Compress page carries its description",
-          b"Choose a file, select a profile" in rc.data)
+          b"Choose a file, select a preset" in rc.data)
     check("Decompress page carries its description",
           b"Restore an AFC file to its original format" in rd.data)
 
@@ -3400,6 +3565,7 @@ def main():
         test_reports(app)
         test_pages_render(app)
         test_public_site_and_action_gates(app)
+        test_restricted_guest_compression_workspace(app, appmod)
         test_intended_destination_preserved(app)
         test_branding_and_about_evidence(app)
         test_container_bytes_are_pinned()

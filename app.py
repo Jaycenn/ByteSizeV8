@@ -33,6 +33,7 @@ SEPARATE COMPRESS AND DECOMPRESS PAGES
 PUBLIC AND WORKSPACE ROUTES
 ---------------------------
   GET  /                     -> public ByteSize landing page
+  GET  /try                  -> bounded anonymous single-file compression
   GET  /dashboard            -> ByteSize Workspace + recent files (signed in)
   GET  /compress             -> Compress Files (single + queue + archive)
   GET  /decompress           -> Decompress Files (single + extract archive)
@@ -44,12 +45,14 @@ PUBLIC AND WORKSPACE ROUTES
   GET  /admin/audit          -> admin only
   GET  /api/config           -> size limits + versions (UI reads limits here)
   POST /api/compress         -> single file; returns metrics + download token
+  POST /api/guest/compress   -> temporary guest result; no history or storage
   POST /api/batch            -> one file of a batch (client drives the queue)
   POST /api/archive/create   -> many files -> one .afcpak
   POST /api/archive/extract  -> .afcpak -> manifest + per-file download tokens
   GET  /api/history          -> JSON history for the signed-in user
   GET  /api/stats            -> JSON aggregate history metrics
   GET  /download/<token>     -> fetch a produced artefact
+  GET  /guest/download/<token> -> fetch a temporary guest AFC result
   GET  /report.csv|/report.pdf -> exports for the current run or history
 
 ANALYSIS AND COMPATIBILITY API
@@ -111,6 +114,7 @@ main = Blueprint("main", __name__)
 # Decompressed originals exist only here.  Compressed AFC/AFCPAK outputs are
 # additionally persisted by ``artifact_store`` and linked to history rows.
 RESULTS = {}
+GUEST_RESULTS = {}
 MAX_KEEP = 60
 
 
@@ -119,6 +123,43 @@ def _stash(name, blob, mimetype="application/octet-stream"):
     RESULTS[token] = (g.user["id"], name, blob, mimetype)
     while len(RESULTS) > MAX_KEEP:
         RESULTS.pop(next(iter(RESULTS)))
+    return token
+
+
+def _guest_identity(create=True):
+    """Opaque signed-session identity for the bounded anonymous trial."""
+    value = session.get("guest_trial_id")
+    if value or not create:
+        return value
+    value = secrets.token_urlsafe(24)
+    session["guest_trial_id"] = value
+    return value
+
+
+def _guest_trial_used():
+    try:
+        return max(0, int(session.get("guest_compressions", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _purge_guest_results():
+    """Expire anonymous downloads independently of durable artifact policy."""
+    cutoff = time.time() - config.GUEST_RESULT_TTL_SECONDS
+    for token, item in list(GUEST_RESULTS.items()):
+        if item[4] < cutoff:
+            GUEST_RESULTS.pop(token, None)
+
+
+def _stash_guest(name, blob, mimetype="application/octet-stream"):
+    """Keep a guest result in memory only; never create history or storage."""
+    _purge_guest_results()
+    token = uuid.uuid4().hex
+    GUEST_RESULTS[token] = (
+        _guest_identity(), _safe_download_name(name), blob, mimetype,
+        time.time())
+    while len(GUEST_RESULTS) > MAX_KEEP:
+        GUEST_RESULTS.pop(next(iter(GUEST_RESULTS)))
     return token
 
 
@@ -304,6 +345,20 @@ def size_error(nbytes, total_batch=None):
                 % (human(total_batch), human(config.MAX_BATCH_SIZE)))
     return None
 
+
+def guest_size_error(nbytes):
+    """Guest uploads have a smaller cap than authenticated workspace files."""
+    if nbytes <= 0:
+        return "That file is empty (0 bytes)."
+    if nbytes < config.MIN_FILE_SIZE:
+        return ("File is %s; the minimum accepted size is %s."
+                % (human(nbytes), human(config.MIN_FILE_SIZE)))
+    if nbytes > config.GUEST_MAX_FILE_SIZE:
+        return ("Guest files are limited to %s. Sign in or create an account "
+                "to use the full workspace limit."
+                % human(config.GUEST_MAX_FILE_SIZE))
+    return None
+
 class OutOfScopeFileError(ValueError):
     """Raised when a new compression input is outside the study scope."""
 
@@ -382,7 +437,7 @@ def human(n):
 
 @main.route("/")
 def landing():
-    """Public ByteSize landing page. Compression stays authentication-gated.
+    """Public landing page with a bounded trial outside the full workspace.
 
     A signed-in visitor has no use for the marketing shell, so `/` sends them
     straight to the workspace that the brand mark already points at."""
@@ -391,6 +446,21 @@ def landing():
     # The preview card names the backend this installation actually loaded;
     # it must never advertise native acceleration that is not present.
     return render_template("landing.html", backend=engine_name())
+
+
+@main.route("/try")
+def guest_compress_page():
+    """Bounded single-file trial with no history or durable storage."""
+    if g.get("user") is not None:
+        return redirect(url_for("main.compress_page"))
+    _guest_identity()
+    return render_template(
+        "guest_compress.html",
+        guest_mode=True,
+        guest_exhausted=(
+            _guest_trial_used() >= config.GUEST_COMPRESSION_LIMIT
+        ),
+    )
 
 
 @main.route("/about")
@@ -452,6 +522,103 @@ def settings_page():
 def api_config():
     """The client reads every limit from here so no cap is duplicated in JS."""
     return jsonify(config.public_dict())
+
+
+@main.post("/api/guest/compress")
+def api_guest_compress():
+    """Create one temporary AFC result within the anonymous trial allowance.
+
+    Guest results are held only in the short-lived in-memory download cache.
+    They never receive a user id, history row, stored-artifact row, analytics
+    entry, queue slot, batch id, or AFCPAK membership.
+    """
+    if g.get("user") is not None:
+        return jsonify(
+            error="Use the signed-in Compress page for account storage.",
+            workspace_url=url_for("main.compress_page"),
+        ), 400
+
+    used = _guest_trial_used()
+    if used >= config.GUEST_COMPRESSION_LIMIT:
+        return jsonify(
+            error="Your guest compression limit has been reached.",
+            trial_exhausted=True,
+            login_url=url_for("auth.login", next=url_for("main.compress_page")),
+            register_url=url_for(
+                "auth.register", next=url_for("main.compress_page")),
+        ), 403
+
+    f = request.files.get("file")
+    if f is None or not f.filename:
+        return jsonify(error="No file selected. Choose a file first."), 400
+
+    data = f.read(config.GUEST_MAX_FILE_SIZE + 1)
+    err = guest_size_error(len(data))
+    if err:
+        return jsonify(error=err), 400
+
+    scope_error = compression_scope_error(f.filename, data)
+    if scope_error:
+        return jsonify(
+            error=scope_error,
+            out_of_scope=True,
+        ), 400
+
+    adaptive = request.form.get("mode", "adaptive") != "baseline"
+    preset = request.form.get("preset", presets.DEFAULT_PRESET)
+    if preset not in ("fast", "balanced", "maximum"):
+        preset = presets.DEFAULT_PRESET
+
+    try:
+        started = time.perf_counter()
+        payload, used_preset, backend = presets.compress_with(
+            data, preset, fmt="auto", adaptive=adaptive)
+        payload_container = payload[:4].decode("ascii", "replace")
+        safe_name = _safe_download_name(f.filename)
+        blob = afc5.wrap(data, payload, safe_name)
+        elapsed = (time.perf_counter() - started) * 1000
+        sha_original = hashlib.sha256(data).hexdigest()
+        lossless = (
+            hashlib.sha256(engine.decompress_bytes(blob)).hexdigest()
+            == sha_original
+        )
+        if not lossless:
+            raise RuntimeError(
+                "Internal round-trip verification failed; no result was "
+                "made available.")
+        token = _stash_guest(safe_name + ".afc", blob)
+    except Exception as exc:
+        return jsonify(error="Processing failed: %s" % exc), 500
+
+    # Rejected inputs and processing/verification failures return above.  The
+    # allowance advances only after the produced AFC has passed a SHA-256
+    # round trip and has a temporary, session-owned download token.
+    used += 1
+    session["guest_compressions"] = used
+    kind = filetypes.sniff(data)
+    return jsonify(
+        name=safe_name,
+        output_name=safe_name + ".afc",
+        original=len(data),
+        compressed=len(blob),
+        ratio=round(len(data) / len(blob), 3) if blob else 0,
+        saved=round(100.0 * (1 - len(blob) / len(data)), 2) if data else 0,
+        container=blob[:4].decode("ascii", "replace"),
+        payload_container=payload_container,
+        engine=backend,
+        preset=used_preset,
+        ms=round(elapsed, 1),
+        lossless=lossless,
+        sha256_original=sha_original,
+        detected=kind["label"],
+        family=kind["family"],
+        container_aware=kind["container_aware"],
+        explain="",
+        token=token,
+        download_url=url_for("main.guest_download", token=token),
+        trial_exhausted=(used >= config.GUEST_COMPRESSION_LIMIT),
+        **backend_status(),
+    )
 
 
 @main.get("/api/history")
@@ -1298,6 +1465,22 @@ def download(token):
                      download_name=name, mimetype=mime)
 
 
+@main.get("/guest/download/<token>")
+def guest_download(token):
+    """Return only a temporary result owned by this guest browser session."""
+    _purge_guest_results()
+    item = GUEST_RESULTS.get(token)
+    guest_id = _guest_identity(create=False)
+    if item is None or not guest_id or item[0] != guest_id:
+        abort(404)
+    _, name, blob, mime, _created_at = item
+    response = send_file(
+        io.BytesIO(blob), as_attachment=True,
+        download_name=name, mimetype=mime)
+    response.headers["Cache-Control"] = "no-store, private"
+    return response
+
+
 def _authorized_artifact(row_id):
     item = db.get_stored_artifact(row_id)
     if item is None or item["user_id"] != g.user["id"]:
@@ -1477,8 +1660,11 @@ def create_app(db_path=None, testing=False, storage_dir=None):
         # Let the authentication decorators produce their normal 401/redirect
         # for anonymous protected endpoints. Login and registration themselves
         # still require a token to prevent login CSRF.
-        auth_entry = request.endpoint in {"auth.login", "auth.register"}
-        if not session.get("user_id") and not auth_entry:
+        auth_entry = request.endpoint in {
+            "auth.login", "auth.register", "auth.verify_email",
+            "auth.resend_verification"}
+        guest_entry = request.endpoint == "main.api_guest_compress"
+        if not session.get("user_id") and not auth_entry and not guest_entry:
             return None
         supplied = (request.form.get("csrf_token") or
                     request.headers.get("X-CSRF-Token"))
@@ -1510,7 +1696,14 @@ def create_app(db_path=None, testing=False, storage_dir=None):
         These headers cover normal HTTP caching; the authenticated-shell
         ``pageshow`` guard covers back-forward-cache restoration.
         """
-        if g.get("user") is not None and request.endpoint != "static":
+        guest_endpoints = {
+            "main.guest_compress_page",
+            "main.api_guest_compress",
+            "main.guest_download",
+        }
+        if (g.get("user") is not None or
+                request.endpoint in guest_endpoints) and \
+                request.endpoint != "static":
             response.headers["Cache-Control"] = (
                 "no-store, no-cache, must-revalidate, max-age=0, private"
             )

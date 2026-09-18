@@ -288,23 +288,54 @@ def create_user(username, email, password, role="user",
     conn = get_db()
     cur = conn.execute(
         "INSERT INTO users (username, email, password_hash, role,"
-        " must_change_password, email_verified) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+        " must_change_password, email_verified) VALUES (?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT DO NOTHING RETURNING id",
         (username, email, generate_password_hash(password), role,
          bool(must_change_password), bool(email_verified)))
-    new_id = cur.fetchone()["id"]
+    row = cur.fetchone()
     conn.commit()
-    return new_id
+    return row["id"] if row else None
 
 
-def save_email_verification(user_id, code_hash, expires_at, sent_at):
+def reserve_email_verification(user_id, now):
+    """Reserve one delivery attempt, across all sessions and app workers.
+
+    sent_at records the attempt, including failed SMTP delivery. Keep its
+    cooldown even after a failure so re-login cannot bypass the rate limit.
+    SMTP runs after commit, outside the database lock.
+    """
+    import secrets
+    from werkzeug.security import check_password_hash, generate_password_hash
     conn = get_db()
-    conn.execute("INSERT INTO email_verification_codes"
-                 " (user_id, code_hash, expires_at, attempt_count, sent_at)"
-                 " VALUES (?, ?, ?, 0, ?) ON CONFLICT(user_id) DO UPDATE SET"
-                 " code_hash=excluded.code_hash, expires_at=excluded.expires_at,"
-                 " attempt_count=0, sent_at=excluded.sent_at",
-                 (user_id, code_hash, int(expires_at), int(sent_at)))
-    conn.commit()
+    try:
+        begin_exclusive(conn, user_id)
+        user = get_user_by_id(user_id)
+        if user is None or not user["is_active"] or user["email_verified"]:
+            conn.commit()
+            return {"retry_after": 0}
+        previous = get_email_verification(user_id)
+        retry_after = max(0, int(previous["sent_at"]) + config.EMAIL_RESEND_SECONDS
+                          - now) if previous else 0
+        if retry_after:
+            conn.commit()
+            return {"retry_after": retry_after}
+        number = secrets.randbelow(1000000)
+        code = "%06d" % number
+        # A resend must not accidentally reissue the immediately previous code.
+        if previous and check_password_hash(previous["code_hash"], code):
+            code = "%06d" % ((number + 1) % 1000000)
+        code_hash = generate_password_hash(code)
+        conn.execute("INSERT INTO email_verification_codes"
+                     " (user_id, code_hash, expires_at, attempt_count, sent_at)"
+                     " VALUES (?, ?, ?, 0, ?) ON CONFLICT(user_id) DO UPDATE SET"
+                     " code_hash=excluded.code_hash, expires_at=excluded.expires_at,"
+                     " attempt_count=0, sent_at=excluded.sent_at",
+                     (user_id, code_hash, now + config.EMAIL_CODE_TTL_SECONDS, now))
+        conn.commit()
+        return {"code": code, "code_hash": code_hash, "retry_after": 0}
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def get_email_verification(user_id):
@@ -312,18 +343,44 @@ def get_email_verification(user_id):
                             (user_id,)).fetchone()
 
 
-def increment_email_verification_attempts(user_id):
+def invalidate_email_verification(user_id, code_hash):
+    """Expire a failed delivery without erasing its cooldown or a newer code."""
     conn = get_db()
-    conn.execute("UPDATE email_verification_codes SET attempt_count=attempt_count+1"
-                 " WHERE user_id=?", (user_id,))
+    conn.execute("UPDATE email_verification_codes SET expires_at=0"
+                 " WHERE user_id=? AND code_hash=?", (user_id, code_hash))
     conn.commit()
 
 
-def mark_email_verified(user_id):
+def consume_email_verification(user_id, code, now):
+    """Serialize checking, attempts, and consumption with code replacement."""
+    from werkzeug.security import check_password_hash
     conn = get_db()
-    conn.execute("UPDATE users SET email_verified=TRUE WHERE id=?", (user_id,))
-    conn.execute("DELETE FROM email_verification_codes WHERE user_id=?", (user_id,))
-    conn.commit()
+    try:
+        begin_exclusive(conn, user_id)
+        user = get_user_by_id(user_id)
+        row = get_email_verification(user_id)
+        if user is None or not user["is_active"] or user["email_verified"]:
+            result = "unavailable"
+        elif row is None or int(row["expires_at"]) <= now:
+            result = "expired"
+        elif int(row["attempt_count"]) >= config.EMAIL_CODE_MAX_ATTEMPTS:
+            result = "limited"
+        elif (len(code) != 6 or not code.isascii() or not code.isdigit()
+              or not check_password_hash(row["code_hash"], code)):
+            conn.execute("UPDATE email_verification_codes"
+                         " SET attempt_count=attempt_count+1 WHERE user_id=?", (user_id,))
+            result = "incorrect"
+        else:
+            updated = conn.execute("UPDATE users SET email_verified=TRUE"
+                                   " WHERE id=? AND is_active=TRUE"
+                                   " AND email_verified=FALSE", (user_id,))
+            result = "verified" if updated.rowcount == 1 else "unavailable"
+            conn.execute("DELETE FROM email_verification_codes WHERE user_id=?", (user_id,))
+        conn.commit()
+        return result
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def set_password(user_id, password):

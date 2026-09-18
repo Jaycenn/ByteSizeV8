@@ -8,6 +8,10 @@
       <h1>Find the structure a byte-by-byte encoder misses.</h1>
       <p class="hero-lead">ByteSize combines multi-level frequency analysis, a bit-cost decision rule, and canonical Huffman coding to reduce repetitive files without changing a single original byte.</p>
       <div class="hero-actions">
+        <a class="button button-secondary"
+          href="{{ url_for('main.guest_compress_page') }}">
+          Compress a file
+        </a>
         <a class="button button-primary" href="{{ url_for('auth.login') }}">Sign in to compress</a>
         <a class="button button-secondary" href="#method">See how it works</a>
       </div>
@@ -27,7 +31,7 @@
         <div class="preview-drop">
           <span class="preview-arrow" aria-hidden="true">↑</span>
           <strong>Drop a file here</strong>
-          <small>Text, source code, markup, structured data, logs and PDF — any file is accepted</small>
+          <small>Accepted inputs include text, source code, markup, structured data, logs, and PDF.</small>
         </div>
         <div class="preview-metrics">
           <div><small>MODE</small><strong>Adaptive</strong></div>
@@ -56,7 +60,7 @@
     <div class="formats-copy">
       <p class="eyebrow">Where the method applies</p>
       <h2>Built for files that still have structure to find.</h2>
-      <p>Every category below is one ByteSize has been measured on, and each result is published in this repository. PDF depends entirely on what is inside it: a book stored as text streams reduces like the text it contains — 71.8% on the Silesia <em>reymont</em> volume — while a PDF of scanned images has nothing left to find, and across 200 real-world documents the average was 12.5%. Any file at all is accepted, and every one is reconstructed byte for byte.</p>
+      <p>Every category below is one ByteSize has been measured on, and each result is published in this repository. PDF depends entirely on what is inside it: a book stored as text streams reduces like the text it contains — 71.8% on the Silesia <em>reymont</em> volume — while a PDF of scanned images has nothing left to find, and across 200 real-world documents the average was 12.5%. Declared in-scope file types are accepted for new compression, and every accepted file is reconstructed byte for byte.</p>
     </div>
     {# Each chip must correspond to a measured row in a committed result file;
        test_advertised_formats_are_measured enforces that, so a category cannot
