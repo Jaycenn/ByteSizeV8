@@ -40,10 +40,10 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/jaycenn/huffmanv7:${{ github.sha }}
-            ghcr.io/jaycenn/huffmanv7:${{ github.ref_name == 'main' && 'azure' || 'aegyog-edits' }}
+            ghcr.io/jaycenn/bytesizev8:${{ github.sha }}
+            ghcr.io/jaycenn/bytesizev8:${{ github.ref_name == 'main' && 'azure' || 'aegyog-edits' }}
           labels: |
-            org.opencontainers.image.source=https://github.com/Jaycenn/HuffmanV7
+            org.opencontainers.image.source=https://github.com/Jaycenn/ByteSizeV8
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
